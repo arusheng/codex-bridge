@@ -87,59 +87,43 @@ def translate_responses_to_chat(req_body):
         messages.append({"role": "system", "content": system})
 
     inp = req_body.get("input", "")
-    if isinstance(inp, list):
-        for i, item in enumerate(inp):
-            if isinstance(item, dict):
-                role = item.get("role", item.get("type", ""))
-                if role == "assistant":
-                    c = item.get("content", "")
-                    if isinstance(c, list):
-                        types = [p.get("type", "") for p in c if isinstance(p, dict)]
-                        has_reasoning = "reasoning" in types
-                        log(f"  [{i}] assistant: types={types} has_reasoning={has_reasoning}")
-                    else:
-                        log(f"  [{i}] assistant: content_type={type(c).__name__} len={len(str(c))}")
-                elif item.get("type") == "function_call":
-                    log(f"  [{i}] function_call: {item.get('name','')}")
-                elif item.get("type") == "function_call_output":
-                    log(f"  [{i}] function_call_output: len={len(str(item.get('output','')))}")
     if isinstance(inp, str):
         messages.append({"role": "user", "content": inp})
     elif isinstance(inp, list):
+        # First pass: collect consecutive function_call items into one assistant message
+        pending_tool_calls = []
         for item in inp:
             if isinstance(item, str):
                 messages.append({"role": "user", "content": item})
             elif isinstance(item, dict):
                 item_type = item.get("type", "")
 
-                # function_call_output = tool result from Codex
+                if item_type == "function_call":
+                    pending_tool_calls.append({
+                        "id": item.get("call_id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": item.get("name", ""),
+                            "arguments": item.get("arguments", "{}"),
+                        }
+                    })
+                    continue
+
+                # Flush pending tool calls as one assistant message
+                if pending_tool_calls:
+                    msg = {"role": "assistant", "content": "", "tool_calls": pending_tool_calls}
+                    if _reasoning_cache:
+                        msg["reasoning_content"] = _reasoning_cache.pop(0)
+                        log(f"Injected reasoning_content ({len(msg['reasoning_content'])}c) into {len(pending_tool_calls)} tool_calls")
+                    messages.append(msg)
+                    pending_tool_calls = []
+
                 if item_type == "function_call_output":
                     messages.append({
                         "role": "tool",
                         "tool_call_id": item.get("call_id", ""),
                         "content": item.get("output", ""),
                     })
-                    continue
-
-                # function_call = tool call from assistant
-                if item_type == "function_call":
-                    msg = {
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [{
-                            "id": item.get("call_id", ""),
-                            "type": "function",
-                            "function": {
-                                "name": item.get("name", ""),
-                                "arguments": item.get("arguments", "{}"),
-                            }
-                        }]
-                    }
-                    # Inject cached reasoning_content (MiMo requires it for tool calls)
-                    if _reasoning_cache:
-                        msg["reasoning_content"] = _reasoning_cache.pop(0)
-                        log(f"Injected cached reasoning_content ({len(msg['reasoning_content'])} chars)")
-                    messages.append(msg)
                     continue
 
                 # Regular message (user/assistant)
@@ -172,6 +156,14 @@ def translate_responses_to_chat(req_body):
                 if tool_calls:
                     msg["tool_calls"] = tool_calls
                 messages.append(msg)
+
+        # Flush any remaining tool calls
+        if pending_tool_calls:
+            msg = {"role": "assistant", "content": "", "tool_calls": pending_tool_calls}
+            if _reasoning_cache:
+                msg["reasoning_content"] = _reasoning_cache.pop(0)
+                log(f"Injected reasoning_content ({len(msg['reasoning_content'])}c) into {len(pending_tool_calls)} trailing tool_calls")
+            messages.append(msg)
 
     model = req_body.get("model", "")
     mapping = cfg.get("model_mapping", {})
