@@ -153,9 +153,26 @@ def translate_responses_to_chat(req_body):
 
     chat_req = {"model": model, "messages": messages}
 
-    # Pass through tools if provided
+    # Convert tools from Responses API format to Chat Completions format
     if "tools" in req_body:
-        chat_req["tools"] = req_body["tools"]
+        converted_tools = []
+        for t in req_body["tools"]:
+            if "function" in t:
+                # Already Chat Completions format
+                converted_tools.append(t)
+            elif "name" in t:
+                # Responses API format: {type, name, description, parameters}
+                converted_tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": t.get("name", ""),
+                        "description": t.get("description", ""),
+                        "parameters": t.get("parameters", {}),
+                    }
+                })
+            else:
+                converted_tools.append(t)
+        chat_req["tools"] = converted_tools
 
     if "max_output_tokens" in req_body:
         chat_req["max_tokens"] = req_body["max_output_tokens"]
