@@ -1,0 +1,14 @@
+{
+  "api_url": "https://your-api-endpoint.com",
+  "api_key": "your-api-key-here",
+  "proxy_url": "http://127.0.0.1:7897",
+  "listen_port": 3080,
+  "model_mapping": {
+    "GPT-5.5": "your-actual-model-1",
+    "GPT-5.4": "your-actual-model-2"
+  },
+  "model_list": [
+    {"id": "GPT-5.5", "name": "Model 1"},
+    {"id": "GPT-5.4", "name": "Model 2"}
+  ]
+}

@@ -1,0 +1,19 @@
+# 含有密钥的配置文件
+config.json
+
+# 日志
+*.log
+logs/
+
+# 数据库
+one-api.db
+
+# Python
+__pycache__/
+*.pyc
+
+# 二进制（太大，README 里写下载方式）
+one-api.exe
+
+# Windows
+*.lnk
