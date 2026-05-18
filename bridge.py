@@ -114,7 +114,9 @@ def translate_responses_to_chat(req_body):
                     msg = {"role": "assistant", "content": "", "tool_calls": pending_tool_calls}
                     if _reasoning_cache:
                         msg["reasoning_content"] = _reasoning_cache.pop(0)
-                        log(f"Injected reasoning_content ({len(msg['reasoning_content'])}c) into {len(pending_tool_calls)} tool_calls")
+                    else:
+                        # MiMo requires reasoning_content for all tool_calls
+                        msg["reasoning_content"] = "Proceeding with tool calls based on the conversation context."
                     messages.append(msg)
                     pending_tool_calls = []
 
@@ -162,7 +164,8 @@ def translate_responses_to_chat(req_body):
             msg = {"role": "assistant", "content": "", "tool_calls": pending_tool_calls}
             if _reasoning_cache:
                 msg["reasoning_content"] = _reasoning_cache.pop(0)
-                log(f"Injected reasoning_content ({len(msg['reasoning_content'])}c) into {len(pending_tool_calls)} trailing tool_calls")
+            else:
+                msg["reasoning_content"] = "Proceeding with tool calls based on the conversation context."
             messages.append(msg)
 
     model = req_body.get("model", "")
@@ -202,7 +205,18 @@ def translate_responses_to_chat(req_body):
     elif "max_tokens" in req_body:
         chat_req["max_tokens"] = req_body["max_tokens"]
     chat_req["stream"] = req_body.get("stream", False)
-    log(f"Outgoing: {json.dumps({k:v for k,v in chat_req.items() if k != 'messages'}, ensure_ascii=False)[:500]}")
+    # Log message summary for debugging
+    msg_summary = []
+    for m in messages:
+        s = m["role"]
+        if m.get("tool_calls"):
+            s += f"(tools:{len(m['tool_calls'])})"
+        if m.get("reasoning_content"):
+            s += f"(reasoning:{len(m['reasoning_content'])}c)"
+        elif m["role"] == "assistant" and not m.get("tool_calls"):
+            s += f"(text:{len(str(m.get('content','')))[:20]})"
+        msg_summary.append(s)
+    log(f"Messages: {msg_summary}")
     return chat_req
 
 
@@ -726,6 +740,12 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
         except urllib.error.HTTPError as e:
             err = e.read().decode("utf-8", errors="replace")
             log(f"Upstream error: {e.code}")
+            # Dump messages for debugging
+            for i, m in enumerate(chat_req.get("messages", [])):
+                role = m.get("role", "?")
+                has_rc = "reasoning_content" in m and m["reasoning_content"]
+                has_tc = "tool_calls" in m and m["tool_calls"]
+                log(f"  msg[{i}] {role} rc={has_rc} tc={has_tc}")
             self._json_response({"error": {"message": err, "type": "upstream_error", "code": str(e.code)}}, e.code)
             return
         except Exception as e:
