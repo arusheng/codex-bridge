@@ -156,13 +156,9 @@ def translate_responses_to_chat(req_body):
     # Convert tools from Responses API format to Chat Completions format
     if "tools" in req_body:
         converted_tools = []
-        has_web_search = False
-        log(f"Tools received: {json.dumps(req_body['tools'], ensure_ascii=False)[:500]}")
         for t in req_body["tools"]:
             tname = t.get("name", "") or t.get("function", {}).get("name", "")
-            # Handle web_search tool - MiMo needs extra body param
-            if tname in ("web_search", "web_search_preview", "webSearch", "WebSearch", "search", "webSearchPreview"):
-                has_web_search = True
+            if not tname:
                 continue
             if "function" in t:
                 converted_tools.append(t)
@@ -179,10 +175,9 @@ def translate_responses_to_chat(req_body):
                 converted_tools.append(t)
         if converted_tools:
             chat_req["tools"] = converted_tools
-        # Enable MiMo web search if requested
-        if has_web_search:
-            chat_req["webSearchEnabled"] = True
-        log(f"Web search detected: {has_web_search}, tools after convert: {len(converted_tools)}")
+        # MiMo requires webSearchEnabled when tools are present
+        chat_req["webSearchEnabled"] = True
+        log(f"Tools: {len(converted_tools)} converted")
 
     if "max_output_tokens" in req_body:
         chat_req["max_tokens"] = req_body["max_output_tokens"]
