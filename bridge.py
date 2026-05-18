@@ -223,7 +223,7 @@ def translate_chat_to_responses_stream(chat_chunks, model, resp_id):
                     full_reasoning += reasoning
 
                 # Handle tool calls in streaming
-                delta_tool_calls = delta.get("tool_calls", [])
+                delta_tool_calls = delta.get("tool_calls") or []
                 for tc in delta_tool_calls:
                     idx = tc.get("index", 0)
                     if idx not in tool_calls:
