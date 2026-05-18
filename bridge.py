@@ -91,6 +91,8 @@ def translate_responses_to_chat(req_body):
             elif isinstance(item, dict):
                 role = item.get("role", "user")
                 content = ""
+                reasoning_content = ""
+                tool_calls = item.get("tool_calls")
                 if "content" in item:
                     c = item["content"]
                     if isinstance(c, str):
@@ -98,14 +100,24 @@ def translate_responses_to_chat(req_body):
                     elif isinstance(c, list):
                         parts = []
                         for p in c:
-                            if isinstance(p, dict) and p.get("type") in ("input_text", "text"):
-                                parts.append(p.get("text", ""))
+                            if isinstance(p, dict):
+                                if p.get("type") in ("input_text", "text"):
+                                    parts.append(p.get("text", ""))
+                                elif p.get("type") == "reasoning":
+                                    reasoning_content = p.get("reasoning", "")
+                                elif p.get("type") == "output_text":
+                                    parts.append(p.get("text", ""))
                             elif isinstance(p, str):
                                 parts.append(p)
                         content = "\n".join(parts)
                 elif "text" in item:
                     content = item["text"]
-                messages.append({"role": role, "content": content})
+                msg = {"role": role, "content": content}
+                if reasoning_content:
+                    msg["reasoning_content"] = reasoning_content
+                if tool_calls:
+                    msg["tool_calls"] = tool_calls
+                messages.append(msg)
 
     model = req_body.get("model", "")
     mapping = cfg.get("model_mapping", {})
@@ -136,6 +148,8 @@ def translate_chat_to_responses_stream(chat_chunks, model, resp_id):
         "id": resp_id, "object": "response", "created_at": int(time.time()),
         "model": model, "output": [], "status": "in_progress"}})
 
+    full_reasoning = ""
+
     for line in chat_chunks:
         line = line.decode("utf-8", errors="replace").strip()
         if not line or line == "data: [DONE]":
@@ -146,8 +160,12 @@ def translate_chat_to_responses_stream(chat_chunks, model, resp_id):
             except json.JSONDecodeError:
                 continue
             for choice in chunk.get("choices", []):
-                text = choice.get("delta", {}).get("content", "")
-                if not started and text:
+                delta = choice.get("delta", {})
+                text = delta.get("content", "")
+                reasoning = delta.get("reasoning_content", "")
+                if reasoning:
+                    full_reasoning += reasoning
+                if not started and (text or reasoning):
                     started = True
                     yield make_sse("response.output_item.added", {"type": "response.output_item.added",
                         "output_index": 0, "item": {"type": "message", "id": f"{resp_id}_msg_0",
@@ -162,24 +180,35 @@ def translate_chat_to_responses_stream(chat_chunks, model, resp_id):
                         "output_index": 0, "content_index": content_index, "part": {"type": "output_text", "text": text}})
                     content_index += 1
 
+    # Build content list with reasoning_content preserved
+    content_parts = [{"type": "output_text", "text": full_text}]
+    if full_reasoning:
+        content_parts.append({"type": "reasoning", "reasoning": full_reasoning})
+
     yield make_sse("response.output_item.done", {"type": "response.output_item.done", "output_index": 0,
         "item": {"type": "message", "id": f"{resp_id}_msg_0", "role": "assistant", "status": "completed",
-        "content": [{"type": "output_text", "text": full_text}]}})
+        "content": content_parts}})
     yield make_sse("response.completed", {"type": "response.completed", "response": {
         "id": resp_id, "object": "response", "created_at": int(time.time()), "model": model,
         "output": [{"type": "message", "id": f"{resp_id}_msg_0", "role": "assistant", "status": "completed",
-        "content": [{"type": "output_text", "text": full_text}]}], "status": "completed",
+        "content": content_parts}], "status": "completed",
         "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}}})
 
 
 def translate_chat_to_responses_nonstream(chat_data, model, resp_id):
     text = ""
+    reasoning = ""
     choices = chat_data.get("choices", [])
     if choices:
-        text = choices[0].get("message", {}).get("content", "")
+        msg = choices[0].get("message", {})
+        text = msg.get("content", "")
+        reasoning = msg.get("reasoning_content", "")
+    content_parts = [{"type": "output_text", "text": text}]
+    if reasoning:
+        content_parts.append({"type": "reasoning", "reasoning": reasoning})
     return {"id": resp_id, "object": "response", "created_at": int(time.time()), "model": model,
         "output": [{"type": "message", "id": f"{resp_id}_msg_0", "role": "assistant", "status": "completed",
-        "content": [{"type": "output_text", "text": text}]}], "status": "completed",
+        "content": content_parts}], "status": "completed",
         "usage": chat_data.get("usage", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})}
 
 
