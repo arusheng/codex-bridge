@@ -16,6 +16,11 @@ import copy
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
+# Cache reasoning_content from responses to inject back in multi-turn
+# Key: simple counter, Value: reasoning text
+_reasoning_cache = []
+_reasoning_cache_max = 20
+
 DEFAULT_CONFIG = {
     "api_url": "https://token-plan-cn.xiaomimimo.com",
     "api_key": "",
@@ -82,6 +87,22 @@ def translate_responses_to_chat(req_body):
         messages.append({"role": "system", "content": system})
 
     inp = req_body.get("input", "")
+    if isinstance(inp, list):
+        for i, item in enumerate(inp):
+            if isinstance(item, dict):
+                role = item.get("role", item.get("type", ""))
+                if role == "assistant":
+                    c = item.get("content", "")
+                    if isinstance(c, list):
+                        types = [p.get("type", "") for p in c if isinstance(p, dict)]
+                        has_reasoning = "reasoning" in types
+                        log(f"  [{i}] assistant: types={types} has_reasoning={has_reasoning}")
+                    else:
+                        log(f"  [{i}] assistant: content_type={type(c).__name__} len={len(str(c))}")
+                elif item.get("type") == "function_call":
+                    log(f"  [{i}] function_call: {item.get('name','')}")
+                elif item.get("type") == "function_call_output":
+                    log(f"  [{i}] function_call_output: len={len(str(item.get('output','')))}")
     if isinstance(inp, str):
         messages.append({"role": "user", "content": inp})
     elif isinstance(inp, list):
@@ -102,7 +123,7 @@ def translate_responses_to_chat(req_body):
 
                 # function_call = tool call from assistant
                 if item_type == "function_call":
-                    messages.append({
+                    msg = {
                         "role": "assistant",
                         "content": "",
                         "tool_calls": [{
@@ -113,7 +134,12 @@ def translate_responses_to_chat(req_body):
                                 "arguments": item.get("arguments", "{}"),
                             }
                         }]
-                    })
+                    }
+                    # Inject cached reasoning_content (MiMo requires it for tool calls)
+                    if _reasoning_cache:
+                        msg["reasoning_content"] = _reasoning_cache.pop(0)
+                        log(f"Injected cached reasoning_content ({len(msg['reasoning_content'])} chars)")
+                    messages.append(msg)
                     continue
 
                 # Regular message (user/assistant)
@@ -283,6 +309,13 @@ def translate_chat_to_responses_stream(chat_chunks, model, resp_id):
         yield make_sse("response.output_item.done", {"type": "response.output_item.done",
             "output_index": len(output_items) - 1, "item": item})
 
+    # Cache reasoning for multi-turn tool call scenarios
+    if full_reasoning:
+        _reasoning_cache.append(full_reasoning)
+        if len(_reasoning_cache) > _reasoning_cache_max:
+            _reasoning_cache.pop(0)
+        log(f"Cached reasoning_content ({len(full_reasoning)} chars)")
+
     yield make_sse("response.completed", {"type": "response.completed", "response": {
         "id": resp_id, "object": "response", "created_at": int(time.time()), "model": model,
         "output": output_items, "status": "completed",
@@ -315,6 +348,13 @@ def translate_chat_to_responses_nonstream(chat_data, model, resp_id):
         output_items.append({"type": "message", "id": f"{resp_id}_msg_0", "role": "assistant",
             "status": "completed", "content": content_parts})
     output_items.extend(tool_calls_out)
+
+    # Cache reasoning for multi-turn tool call scenarios
+    if reasoning:
+        _reasoning_cache.append(reasoning)
+        if len(_reasoning_cache) > _reasoning_cache_max:
+            _reasoning_cache.pop(0)
+        log(f"Cached reasoning_content ({len(reasoning)} chars)")
 
     return {"id": resp_id, "object": "response", "created_at": int(time.time()), "model": model,
         "output": output_items, "status": "completed",
