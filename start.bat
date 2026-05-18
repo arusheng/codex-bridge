@@ -1,11 +1,11 @@
 @echo off
 title MiMo Bridge
-
 cd /d "%~dp0"
 
 if not exist config.json (
-    echo [!] config.json not found. Copying from config.example.json...
+    echo [!] config.json not found, creating from config.example.json...
     copy config.example.json config.json
+    echo.
     echo [!] Please edit config.json with your API settings, then restart.
     pause
     exit /b 1
