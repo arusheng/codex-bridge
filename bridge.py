@@ -21,6 +21,17 @@ CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.j
 _reasoning_cache = []
 _reasoning_cache_max = 20
 
+# Request statistics (in-memory, reset on restart)
+_stats = {
+    "total_requests": 0,
+    "responses_requests": 0,
+    "chat_requests": 0,
+    "stream_requests": 0,
+    "errors": 0,
+    "upstream_errors": 0,
+    "started_at": None,
+}
+
 DEFAULT_CONFIG = {
     "api_url": "https://token-plan-cn.xiaomimimo.com",
     "api_key": "",
@@ -32,6 +43,7 @@ DEFAULT_CONFIG = {
         "GPT-5.5": "mimo-v2-omni",
         "GPT-5.4": "mimo-v2.5-pro",
     },
+    "request_timeout": 300,
     "model_list": [
         {"id": "GPT-5.5", "name": "MiMo 全模态 (mimo-v2-omni)"},
         {"id": "GPT-5.4", "name": "MiMo 2.5 Pro (mimo-v2.5-pro)"},
@@ -68,6 +80,7 @@ def proxy_to_api(path, method, headers, body=None):
     if ct:
         req.add_header("Content-Type", ct)
     proxy_url = cfg.get("proxy_url", "")
+    timeout = cfg.get("request_timeout", 300)
     if proxy_url:
         opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({"https": proxy_url, "http": proxy_url}),
@@ -77,7 +90,7 @@ def proxy_to_api(path, method, headers, body=None):
         opener = urllib.request.build_opener(
             urllib.request.HTTPSHandler(context=create_ssl_context())
         )
-    return opener.open(req, timeout=300)
+    return opener.open(req, timeout=timeout)
 
 
 def translate_responses_to_chat(req_body):
@@ -416,6 +429,19 @@ hr{border:none;border-top:1px solid #2a2d3a;margin:14px 0}
   <p class="subtitle">API 中转管理面板 &nbsp;|&nbsp; <span id="statusBadge" class="status status-ok">运行中</span></p>
 
   <div class="card">
+    <div class="card-title">运行统计</div>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:.85rem">
+      <span>总请求 <b id="statTotal">-</b></span>
+      <span>Responses <b id="statResp">-</b></span>
+      <span>Chat <b id="statChat">-</b></span>
+      <span>流式 <b id="statStream">-</b></span>
+      <span>错误 <b id="statErr">-</b></span>
+      <span>上游错误 <b id="statUpErr">-</b></span>
+      <span>运行 <b id="statUptime">-</b></span>
+    </div>
+  </div>
+
+  <div class="card">
     <div class="card-title">API 连接</div>
     <div class="row">
       <div><label>API 地址</label><input id="api_url" placeholder="https://api.example.com/v1"></div>
@@ -469,6 +495,23 @@ async function load() {
   document.getElementById('proxy_url').value = config.proxy_url || '';
   renderMappings();
   renderModels();
+  loadStats();
+  setInterval(loadStats, 10000);
+}
+
+async function loadStats() {
+  try {
+    const r = await fetch('/api/stats');
+    const s = await r.json();
+    document.getElementById('statTotal').textContent = s.total_requests;
+    document.getElementById('statResp').textContent = s.responses_requests;
+    document.getElementById('statChat').textContent = s.chat_requests;
+    document.getElementById('statStream').textContent = s.stream_requests;
+    document.getElementById('statErr').textContent = s.errors;
+    document.getElementById('statUpErr').textContent = s.upstream_errors;
+    const up = s.uptime_seconds;
+    document.getElementById('statUptime').textContent = up < 3600 ? Math.floor(up/60) + '分' : (up/3600).toFixed(1) + '时';
+  } catch (e) { /* stats unavailable */ }
 }
 
 function renderMappings() {
@@ -631,6 +674,21 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+        elif self.path == "/health":
+            uptime = int(time.time() - _stats["started_at"]) if _stats["started_at"] else 0
+            self._json_response({
+                "status": "ok",
+                "uptime_seconds": uptime,
+                "total_requests": _stats["total_requests"],
+                "errors": _stats["errors"],
+            })
+        elif self.path == "/api/stats":
+            uptime = int(time.time() - _stats["started_at"]) if _stats["started_at"] else 0
+            self._json_response({
+                **_stats,
+                "uptime_seconds": uptime,
+                "reasoning_cache_size": len(_reasoning_cache),
+            })
         elif self.path == "/api/config":
             data = json.dumps(cfg, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
@@ -716,9 +774,12 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
             self._proxy_passthrough(raw)
 
     def _handle_responses(self, body):
+        _stats["total_requests"] += 1
+        _stats["responses_requests"] += 1
         try:
             req_body = json.loads(body.decode("utf-8", errors="replace"))
         except json.JSONDecodeError:
+            _stats["errors"] += 1
             self._json_response({"error": "Invalid JSON"}, 400)
             return
 
@@ -734,10 +795,14 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
         stream = chat_req.get("stream", False)
 
         log(f"Responses: {display_model} -> {model} stream={stream}")
+        if stream:
+            _stats["stream_requests"] += 1
 
         try:
             resp = proxy_to_api("/v1/chat/completions", "POST", {"Content-Type": "application/json"}, chat_body)
         except urllib.error.HTTPError as e:
+            _stats["errors"] += 1
+            _stats["upstream_errors"] += 1
             err = e.read().decode("utf-8", errors="replace")
             log(f"Upstream error: {e.code}")
             # Dump messages for debugging
@@ -749,6 +814,7 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
             self._json_response({"error": {"message": err, "type": "upstream_error", "code": str(e.code)}}, e.code)
             return
         except Exception as e:
+            _stats["errors"] += 1
             log(f"Error: {e}")
             self._json_response({"error": {"message": str(e), "type": "bridge_error"}}, 502)
             return
@@ -779,6 +845,8 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(data)
 
     def _proxy_passthrough(self, body):
+        _stats["total_requests"] += 1
+        _stats["chat_requests"] += 1
         method = "POST" if body else "GET"
         try:
             resp = proxy_to_api(self.path, method, dict(self.headers), body)
@@ -789,6 +857,8 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
         except urllib.error.HTTPError as e:
+            _stats["errors"] += 1
+            _stats["upstream_errors"] += 1
             data = e.read()
             self.send_response(e.code)
             self.send_header("Content-Type", "application/json")
@@ -796,6 +866,7 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
         except Exception as e:
+            _stats["errors"] += 1
             self._json_response({"error": {"message": str(e), "type": "bridge_error"}}, 502)
 
     def _json_response(self, obj, code=200):
@@ -817,6 +888,7 @@ def log(msg):
 
 if __name__ == "__main__":
     load_config()
+    _stats["started_at"] = time.time()
     port = cfg.get("listen_port", 3080)
     server = http.server.HTTPServer(("127.0.0.1", port), BridgeHandler)
     log(f"MiMo Bridge running on http://127.0.0.1:{port}")
